@@ -1467,8 +1467,9 @@ app.add_middleware(CORSMiddleware,allow_origins=["*"],allow_credentials=True,all
 async def root():
     return {"service":"NEMAZING RP","version":"13.0.0","status":"online","health":"/health","api_health":"/api/health"}
 
-@app.get("/health")
-async def health(): return {"status":"ok","service":"nemazing-rp"}
+@app.api_route("/health", methods=["GET", "HEAD"])
+async def health():
+    return {"status": "ok", "service": "nemazing-rp"}
 
 @app.get("/api/health")
 async def api_health(): return {"status":"ok","service":"nemazing-rp","bot_configured":bool(BOT_TOKEN),"database_configured":bool(DATABASE_URL)}
