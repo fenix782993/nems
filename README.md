@@ -44,4 +44,8 @@ Python: `3.12.10`
 This build includes a migration for older Render PostgreSQL databases where `organizations.title` existed as NOT NULL. The migration fills legacy titles and makes the unused legacy column safe for current inserts. It also removes the deprecated `datetime.utcnow()` warning. Do not delete the existing PostgreSQL database.
 
 
-V6: PostgreSQL legacy organizations.auto_ban_on_leave migration fixed.
+V7: PostgreSQL legacy organizations.auto_ban_on_leave migration fixed.
+
+
+## V7 — one-shot deployment
+This build contains an automatic PostgreSQL compatibility pass. You do not need to manually transfer, rename, or edit legacy tables. Deploy the repository and restart Render; the bot repairs legacy NOT NULL columns automatically while preserving existing rows.

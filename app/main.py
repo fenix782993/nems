@@ -1404,6 +1404,32 @@ async def _migrate_schema():
             "UPDATE organizations SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)"
         )
 
+        # FINAL compatibility pass: previous NEMAZING versions created
+        # additional NOT NULL columns which are no longer part of the current
+        # model. PostgreSQL still checks those columns on every INSERT, even
+        # though SQLAlchemy no longer knows about them. Instead of forcing the
+        # owner to manually alter/move the database, automatically make only
+        # unknown legacy columns nullable. Primary keys and current ORM columns
+        # are never touched. This makes the bot deployable against an existing
+        # Render database in one shot.
+        current_tables = {
+            table.name: {column.name for column in table.columns}
+            for table in Base.metadata.sorted_tables
+        }
+        for table_name, known_columns in current_tables.items():
+            rows = (await conn.exec_driver_sql(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name=:t "
+                "AND is_nullable='NO' AND column_name <> 'id'",
+                {"t": table_name},
+            )).fetchall()
+            for (column_name,) in rows:
+                if column_name not in known_columns:
+                    # Identifier names come from information_schema, not user input.
+                    await conn.exec_driver_sql(
+                        f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" DROP NOT NULL'
+                    )
+
 
 async def init_db():
     # First create any completely new tables.
@@ -1487,7 +1513,7 @@ async def lifespan(app: FastAPI):
     with suppress(Exception):
         await engine.dispose()
 
-app = FastAPI(title="NEMAZING RP", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="NEMAZING RP", version="1.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/")
