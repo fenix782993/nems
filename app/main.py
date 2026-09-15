@@ -16,6 +16,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BufferedInputFile,
+    FSInputFile,
     CallbackQuery,
     ChatMemberUpdated,
     InlineKeyboardButton,
@@ -32,6 +33,8 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 (BASE_DIR / "data").mkdir(parents=True, exist_ok=True)
 (BASE_DIR / "exports").mkdir(parents=True, exist_ok=True)
+(BANNER_DIR := BASE_DIR / "баннеры").mkdir(parents=True, exist_ok=True)
+(BASE_DIR / "banners").mkdir(parents=True, exist_ok=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
@@ -181,34 +184,56 @@ bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
 dp = Dispatcher()
 
 
+def find_banner() -> Optional[Path]:
+    # Automatically uses the first image placed in /баннеры or /banners.
+    dirs = [BANNER_DIR, BASE_DIR / "banners"]
+    exts = {".png", ".jpg", ".jpeg", ".webp"}
+    for directory in dirs:
+        if directory.exists():
+            files = sorted([p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in exts])
+            if files:
+                return files[0]
+    return None
+
+
+def page_keyboard(*rows):
+    return InlineKeyboardMarkup(inline_keyboard=[*rows, [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")]])
+
+
+async def edit_page(call: CallbackQuery, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
+    # Home can be a photo message. Telegram does not allow edit_text on photo messages.
+    if call.message and call.message.photo:
+        await call.message.edit_caption(caption=text, reply_markup=reply_markup)
+    else:
+        await call.message.edit_text(text, reply_markup=reply_markup)
+
+
 def menu_keyboard(admin: bool = False) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="📝 Подать заявление", callback_data="apply")],
+        [InlineKeyboardButton(text="📝  ПОДАТЬ ЗАЯВЛЕНИЕ", callback_data="apply")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"), InlineKeyboardButton(text="🏛 Организация", callback_data="organization")],
         [InlineKeyboardButton(text="📋 Критерии", callback_data="criteria"), InlineKeyboardButton(text="📄 Рапорт", callback_data="report")],
         [InlineKeyboardButton(text="🛠 Сервисы", callback_data="services"), InlineKeyboardButton(text="❓ Помощь", callback_data="help")],
     ]
     if admin:
-        rows.append([InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin")])
+        rows.append([InlineKeyboardButton(text="⚙️  АДМИН-ПАНЕЛЬ", callback_data="admin")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
 
 def organizations_keyboard(prefix: str = "org") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="ФСБ", callback_data=f"{prefix}:ФСБ"), InlineKeyboardButton(text="ВЧ", callback_data=f"{prefix}:ВЧ")],
-        [InlineKeyboardButton(text="ЕСС", callback_data=f"{prefix}:ЕСС"), InlineKeyboardButton(text="УМВД", callback_data=f"{prefix}:УМВД")],
-        [InlineKeyboardButton(text="↩️ Назад", callback_data="home")],
+        [InlineKeyboardButton(text="🛡 ФСБ", callback_data=f"{prefix}:ФСБ"), InlineKeyboardButton(text="🎖 ВЧ", callback_data=f"{prefix}:ВЧ")],
+        [InlineKeyboardButton(text="🚑 ЕСС", callback_data=f"{prefix}:ЕСС"), InlineKeyboardButton(text="🚔 УМВД", callback_data=f"{prefix}:УМВД")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
     ])
-
 
 def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📥 Заявления", callback_data="admin_apps"), InlineKeyboardButton(text="📄 Рапорты", callback_data="admin_reports")],
         [InlineKeyboardButton(text="👥 Личный состав", callback_data="admin_people"), InlineKeyboardButton(text="🏛 Организации", callback_data="admin_orgs")],
-        [InlineKeyboardButton(text="📊 Excel", callback_data="admin_excel"), InlineKeyboardButton(text="📌 Критерии", callback_data="admin_criteria")],
+        [InlineKeyboardButton(text="📊 Скачать Excel", callback_data="admin_excel"), InlineKeyboardButton(text="📌 Критерии", callback_data="admin_criteria")],
+        [InlineKeyboardButton(text="🖼 Показать баннер", callback_data="admin_banner")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
     ])
-
 
 def is_admin(user_id: int) -> bool:
     return user_id == OWNER_ID
@@ -261,11 +286,20 @@ async def subscribed(user_id: int) -> bool:
 async def send_home(message: Message):
     async with SessionLocal() as session:
         user = await ensure_user(session, message.from_user.id, message.from_user.username, message.from_user.first_name)
-    await message.answer(
-        "<b>NEMAZING RP</b>\n\nДобро пожаловать в систему управления RP-персоналом.",
-        reply_markup=menu_keyboard(is_admin(user.telegram_id)),
+    text = (
+        "NEMAZING RP\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Система управления RP-персоналом\n\n"
+        "Выберите нужный раздел ниже."
     )
-
+    banner = find_banner()
+    if banner:
+        try:
+            await message.answer_photo(FSInputFile(banner), caption=text, reply_markup=menu_keyboard(is_admin(user.telegram_id)))
+            return
+        except Exception:
+            pass
+    await message.answer(text, reply_markup=menu_keyboard(is_admin(user.telegram_id)))
 
 @dp.message(CommandStart())
 async def start(message: Message):
@@ -287,7 +321,7 @@ async def start(message: Message):
 async def check_sub(call: CallbackQuery):
     if await subscribed(call.from_user.id) or is_admin(call.from_user.id):
         await call.answer("Подписка подтверждена")
-        await call.message.edit_text("<b>NEMAZING RP</b>\n\nДоступ открыт.", reply_markup=menu_keyboard(is_admin(call.from_user.id)))
+        await edit_page(call, "NEMAZING RP\n\nДоступ открыт.", reply_markup=menu_keyboard(is_admin(call.from_user.id)))
     else:
         await call.answer("Подписка не найдена", show_alert=True)
 
@@ -295,9 +329,12 @@ async def check_sub(call: CallbackQuery):
 @dp.callback_query(F.data == "home")
 async def home(call: CallbackQuery, state: FSMContext):
     await state.clear()
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await send_home(call.message)
     await call.answer()
-    await call.message.edit_text("<b>NEMAZING RP</b>\n\nГлавное меню.", reply_markup=menu_keyboard(is_admin(call.from_user.id)))
-
 
 @dp.callback_query(F.data == "apply")
 async def apply_start(call: CallbackQuery, state: FSMContext):
@@ -306,7 +343,7 @@ async def apply_start(call: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await state.set_state(ApplyStates.organization)
-    await call.message.edit_text("Выберите организацию:", reply_markup=organizations_keyboard("applyorg"))
+    await edit_page(call, "Выберите организацию:", reply_markup=organizations_keyboard("applyorg"))
     await call.answer()
 
 
@@ -315,7 +352,7 @@ async def apply_org(call: CallbackQuery, state: FSMContext):
     org = call.data.split(":", 1)[1]
     await state.update_data(organization=org)
     await state.set_state(ApplyStates.nickname)
-    await call.message.edit_text("Введите RP-никнейм:")
+    await edit_page(call, "Введите RP-никнейм:")
     await call.answer()
 
 
@@ -346,12 +383,12 @@ async def apply_department(message: Message, state: FSMContext):
     data = await state.get_data()
     await state.set_state(ApplyStates.confirm)
     text = (
-        "<b>Проверьте заявление</b>\n\n"
-        f"Организация: <b>{data['organization']}</b>\n"
-        f"Ник: <b>{data['nickname']}</b>\n"
-        f"Звание: <b>{data['rank']}</b>\n"
-        f"Должность: <b>{data['position']}</b>\n"
-        f"Отдел: <b>{data['department']}</b>"
+        "Проверьте заявление\n\n"
+        f"Организация: {data['organization']}\n"
+        f"Ник: {data['nickname']}\n"
+        f"Звание: {data['rank']}\n"
+        f"Должность: {data['position']}\n"
+        f"Отдел: {data['department']}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Отправить", callback_data="apply_confirm")],
@@ -375,12 +412,12 @@ async def apply_confirm(call: CallbackQuery, state: FSMContext):
         await session.commit()
         app_id = app.id
     await state.clear()
-    await call.message.edit_text("✅ Заявление отправлено владельцу на рассмотрение.")
+    await edit_page(call, "✅ Заявление отправлено владельцу на рассмотрение.")
     if bot and OWNER_ID:
         await bot.send_message(
             OWNER_ID,
-            f"<b>Новое заявление #{app_id}</b>\n\n"
-            f"Пользователь: <code>{call.from_user.id}</code> @{call.from_user.username or 'нет'}\n"
+            f"Новое заявление #{app_id}\n\n"
+            f"Пользователь: {call.from_user.id} @{call.from_user.username or 'нет'}\n"
             f"Организация: {data['organization']}\nНик: {data['nickname']}\nЗвание: {data['rank']}\n"
             f"Должность: {data['position']}\nОтдел: {data['department']}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -424,7 +461,7 @@ async def approve_app(call: CallbackQuery):
     await call.message.edit_reply_markup(reply_markup=None)
     await call.message.answer(f"✅ Заявление #{app_id} одобрено.")
     if bot:
-        text = f"✅ <b>Заявление одобрено</b>\n\nВас приняли в <b>{app.organization}</b>."
+        text = f"✅ Заявление одобрено\n\nВас приняли в {app.organization}."
         if invite:
             text += f"\n\n🔐 Ссылка в закрытый чат:\n{invite}"
         elif chat_id:
@@ -465,15 +502,15 @@ async def reject_app(call: CallbackQuery):
 async def profile(call: CallbackQuery):
     async with SessionLocal() as session:
         user = await ensure_user(session, call.from_user.id, call.from_user.username, call.from_user.first_name)
-    await call.message.edit_text(
-        "<b>👤 Профиль</b>\n\n"
-        f"ID: <code>{user.telegram_id}</code>\n"
-        f"Ник: <b>{user.nickname or '—'}</b>\n"
-        f"Организация: <b>{user.organization or '—'}</b>\n"
-        f"Звание: <b>{user.rank or '—'}</b>\n"
-        f"Должность: <b>{user.position or '—'}</b>\n"
-        f"Отдел: <b>{user.department or '—'}</b>\n"
-        f"Статус: <b>{'АКТИВЕН' if user.active and not user.archived else 'АРХИВ'}</b>",
+    await edit_page(call, 
+        "👤 Профиль\n\n"
+        f"ID: {user.telegram_id}\n"
+        f"Ник: {user.nickname or '—'}\n"
+        f"Организация: {user.organization or '—'}\n"
+        f"Звание: {user.rank or '—'}\n"
+        f"Должность: {user.position or '—'}\n"
+        f"Отдел: {user.department or '—'}\n"
+        f"Статус: {'АКТИВЕН' if user.active and not user.archived else 'АРХИВ'}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="home")]]),
     )
     await call.answer()
@@ -488,11 +525,11 @@ async def organization(call: CallbackQuery):
         else:
             result = await session.execute(select(User).where(User.organization == user.organization, User.active == True, User.archived == False))
             people = result.scalars().all()
-            lines = [f"<b>🏛 {user.organization}</b>", ""]
+            lines = [f"🏛 {user.organization}", ""]
             for p in people[:80]:
                 lines.append(f"• {p.nickname or p.first_name or 'Без имени'} — {p.rank or 'без звания'}")
             text = "\n".join(lines)
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="home")]]))
+    await edit_page(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="home")]]))
     await call.answer()
 
 
@@ -502,13 +539,13 @@ async def criteria(call: CallbackQuery):
         result = await session.execute(select(Criterion).order_by(Criterion.organization, Criterion.id))
         items = result.scalars().all()
     if not items:
-        text = "<b>📋 Критерии повышения</b>\n\nКритерии пока не добавлены владельцем."
+        text = "📋 Критерии повышения\n\nКритерии пока не добавлены владельцем."
     else:
-        parts = ["<b>📋 Критерии повышения</b>"]
+        parts = ["📋 Критерии повышения"]
         for c in items[:50]:
-            parts.append(f"\n<b>{c.organization} — {c.rank}</b>\n{c.title}\n{c.description}")
+            parts.append(f"\n{c.organization} — {c.rank}\n{c.title}\n{c.description}")
         text = "\n".join(parts)
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="home")]]))
+    await edit_page(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="home")]]))
     await call.answer()
 
 
@@ -521,7 +558,7 @@ async def report_start(call: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await state.set_state(ReportStates.to_whom)
-    await call.message.edit_text("<b>Рапорт о повышении</b>\n\nУкажите, кому рапорт:")
+    await edit_page(call, "Рапорт о повышении\n\nУкажите, кому рапорт:")
     await call.answer()
 
 
@@ -559,7 +596,7 @@ async def report_signature(message: Message, state: FSMContext):
     data = await state.get_data()
     await state.set_state(ReportStates.confirm)
     await message.answer(
-        "<b>Проверьте рапорт</b>\n\n"
+        "Проверьте рапорт\n\n"
         f"Кому: {data['to_whom']}\nОт кого: {data['from_whom']}\n"
         f"Задачи/баллы: {data['task_points']}\nДоказательства: {data['evidence']}\nПодпись: {data['signature']}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -582,12 +619,12 @@ async def report_confirm(call: CallbackQuery, state: FSMContext):
         await session.commit()
         report_id = report.id
     await state.clear()
-    await call.message.edit_text(f"✅ Рапорт #{report_id} отправлен владельцу.")
+    await edit_page(call, f"✅ Рапорт #{report_id} отправлен владельцу.")
     if bot and OWNER_ID:
         await bot.send_message(
             OWNER_ID,
-            f"<b>Новый рапорт #{report_id}</b>\n\n"
-            f"От: <code>{call.from_user.id}</code>\nКому: {data['to_whom']}\nОт кого: {data['from_whom']}\n"
+            f"Новый рапорт #{report_id}\n\n"
+            f"От: {call.from_user.id}\nКому: {data['to_whom']}\nОт кого: {data['from_whom']}\n"
             f"Задачи: {data['task_points']}\nДоказательства: {data['evidence']}\nПодпись: {data['signature']}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ Принять", callback_data=f"approve_report:{report_id}"), InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_report:{report_id}")]
@@ -634,8 +671,8 @@ async def reject_report(call: CallbackQuery):
 
 @dp.callback_query(F.data == "services")
 async def services(call: CallbackQuery):
-    await call.message.edit_text(
-        "<b>🛠 Сервисы</b>\n\n"
+    await edit_page(call, 
+        "🛠 Сервисы\n\n"
         "🔐 Fenix VPN — @FenixVpNRobot\n"
         "⭐ Buy Stars — @Fenix_stars_bot",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="home")]]),
@@ -645,8 +682,8 @@ async def services(call: CallbackQuery):
 
 @dp.callback_query(F.data == "help")
 async def help_page(call: CallbackQuery):
-    await call.message.edit_text(
-        "<b>❓ Помощь</b>\n\n"
+    await edit_page(call, 
+        "❓ Помощь\n\n"
         "1. Подпишитесь на канал.\n"
         "2. Подайте заявление.\n"
         "3. Дождитесь решения владельца.\n"
@@ -662,7 +699,7 @@ async def admin_panel(call: CallbackQuery):
     if not is_admin(call.from_user.id):
         await call.answer("Нет доступа", show_alert=True)
         return
-    await call.message.edit_text("<b>⚙️ Админ-панель NEMAZING RP</b>", reply_markup=admin_keyboard())
+    await edit_page(call, "⚙️ Админ-панель NEMAZING RP", reply_markup=admin_keyboard())
     await call.answer()
 
 
@@ -674,13 +711,13 @@ async def admin_apps(call: CallbackQuery):
         result = await session.execute(select(Application).where(Application.status == "PENDING").order_by(Application.id.desc()).limit(20))
         apps = result.scalars().all()
     if not apps:
-        text = "<b>📥 Заявления</b>\n\nНовых заявлений нет."
+        text = "📥 Заявления\n\nНовых заявлений нет."
     else:
-        lines = ["<b>📥 Заявления</b>"]
+        lines = ["📥 Заявления"]
         for a in apps:
             lines.append(f"\n#{a.id} — {a.organization}\n{a.nickname} | {a.rank} | {a.position}")
         text = "\n".join(lines)
-    await call.message.edit_text(text, reply_markup=admin_keyboard())
+    await edit_page(call, text, reply_markup=admin_keyboard())
     await call.answer()
 
 
@@ -692,10 +729,10 @@ async def admin_reports(call: CallbackQuery):
         result = await session.execute(select(Report).where(Report.status == "PENDING").order_by(Report.id.desc()).limit(20))
         reports = result.scalars().all()
     if not reports:
-        text = "<b>📄 Рапорты</b>\n\nНовых рапортов нет."
+        text = "📄 Рапорты\n\nНовых рапортов нет."
     else:
-        text = "<b>📄 Рапорты</b>\n\n" + "\n".join(f"#{r.id} — {r.to_whom} — {r.from_whom}" for r in reports)
-    await call.message.edit_text(text, reply_markup=admin_keyboard())
+        text = "📄 Рапорты\n\n" + "\n".join(f"#{r.id} — {r.to_whom} — {r.from_whom}" for r in reports)
+    await edit_page(call, text, reply_markup=admin_keyboard())
     await call.answer()
 
 
@@ -706,10 +743,10 @@ async def admin_people(call: CallbackQuery):
     async with SessionLocal() as session:
         result = await session.execute(select(User).order_by(User.id.desc()).limit(50))
         users = result.scalars().all()
-    lines = ["<b>👥 Личный состав</b>"]
+    lines = ["👥 Личный состав"]
     for u in users:
         lines.append(f"#{u.id} | {u.nickname or u.first_name or '—'} | {u.organization or '—'} | {u.role} | {'ACTIVE' if u.active else 'ARCHIVE'}")
-    await call.message.edit_text("\n".join(lines), reply_markup=admin_keyboard())
+    await edit_page(call, "\n".join(lines), reply_markup=admin_keyboard())
     await call.answer()
 
 
@@ -720,10 +757,10 @@ async def admin_orgs(call: CallbackQuery):
     async with SessionLocal() as session:
         result = await session.execute(select(Organization).order_by(Organization.id))
         orgs = result.scalars().all()
-    lines = ["<b>🏛 Организации</b>"]
+    lines = ["🏛 Организации"]
     for o in orgs:
         lines.append(f"• {o.name} | chat: {o.chat_id or '—'} | invite: {'есть' if o.invite_link else 'нет'}")
-    await call.message.edit_text("\n".join(lines), reply_markup=admin_keyboard())
+    await edit_page(call, "\n".join(lines), reply_markup=admin_keyboard())
     await call.answer()
 
 
@@ -734,14 +771,15 @@ async def admin_criteria(call: CallbackQuery):
     async with SessionLocal() as session:
         result = await session.execute(select(Criterion).order_by(Criterion.id.desc()).limit(30))
         criteria_items = result.scalars().all()
-    text = "<b>📌 Критерии</b>\n\n" + ("\n".join(f"#{c.id} {c.organization} — {c.rank}: {c.title}" for c in criteria_items) if criteria_items else "Критерии отсутствуют.")
-    await call.message.edit_text(text, reply_markup=admin_keyboard())
+    text = "📌 Критерии\n\n" + ("\n".join(f"#{c.id} {c.organization} — {c.rank}: {c.title}" for c in criteria_items) if criteria_items else "Критерии отсутствуют.")
+    await edit_page(call, text, reply_markup=admin_keyboard())
     await call.answer()
 
 
 @dp.callback_query(F.data == "admin_excel")
 async def admin_excel(call: CallbackQuery):
-    if not is_admin(call.from_user.id) or not bot:
+    if not is_admin(call.from_user.id):
+        await call.answer("Нет доступа", show_alert=True)
         return
     async with SessionLocal() as session:
         users = (await session.execute(select(User).order_by(User.id))).scalars().all()
@@ -763,9 +801,27 @@ async def admin_excel(call: CallbackQuery):
         wr.append([r.id, r.user_id, r.to_whom, r.from_whom, r.task_points, r.evidence, r.signature, r.status, r.created_at])
     stream = io.BytesIO()
     wb.save(stream)
-    stream.seek(0)
-    await call.message.answer_document(BufferedInputFile(stream.read(), filename="nemazing_personnel.xlsx"), caption="📊 Выгрузка NEMAZING RP")
-    await call.answer()
+    data_bytes = stream.getvalue()
+    export_path = BASE_DIR / "exports" / "nemazing_personnel.xlsx"
+    export_path.write_bytes(data_bytes)
+    await call.message.answer_document(
+        BufferedInputFile(data_bytes, filename="nemazing_personnel.xlsx"),
+        caption="📊 Excel-выгрузка NEMAZING RP\nЛичный состав • заявления • рапорты"
+    )
+    await call.answer("Excel сформирован")
+
+
+@dp.callback_query(F.data == "admin_banner")
+async def admin_banner(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("Нет доступа", show_alert=True)
+        return
+    banner = find_banner()
+    if not banner:
+        await call.answer("В папке баннеры нет PNG/JPG/WEBP", show_alert=True)
+        return
+    await call.message.answer_photo(FSInputFile(banner), caption="🖼 Баннер NEMAZING RP")
+    await call.answer("Баннер отправлен")
 
 
 @dp.message(Command("setchat"))
@@ -948,11 +1004,60 @@ async def _migrate_schema():
         return
 
     statements = [
+        # users
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS rank VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS position VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS department VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS organization VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP WITHOUT TIME ZONE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP WITHOUT TIME ZONE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
+        # organizations
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS name VARCHAR(255)",
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS code VARCHAR(50)",
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS chat_id BIGINT",
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS invite_link TEXT",
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
+        # applications
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS organization VARCHAR(255)",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS nickname VARCHAR(255)",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS rank VARCHAR(255)",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS position VARCHAR(255)",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS department VARCHAR(255)",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'PENDING'",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS reject_reason TEXT",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS reviewed_by BIGINT",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP WITHOUT TIME ZONE",
+        # criteria
+        "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS organization VARCHAR(255)",
+        "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS rank VARCHAR(255)",
+        "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS title VARCHAR(255)",
+        "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS description TEXT",
+        "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
+        # reports
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS user_id INTEGER",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS to_whom VARCHAR(255)",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS from_whom VARCHAR(255)",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS task_points TEXT",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS evidence TEXT",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS signature VARCHAR(255)",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'PENDING'",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS reject_reason TEXT",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_by BIGINT",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP WITHOUT TIME ZONE",
+        # banners table
+        "ALTER TABLE banners ADD COLUMN IF NOT EXISTS section VARCHAR(100)",
+        "ALTER TABLE banners ADD COLUMN IF NOT EXISTS file_id TEXT",
+        "ALTER TABLE banners ADD COLUMN IF NOT EXISTS caption TEXT",
+        "ALTER TABLE banners ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
     ]
     async with engine.begin() as conn:
         for sql in statements:
@@ -960,6 +1065,16 @@ async def _migrate_schema():
 
         # Repair rows created by an older version. We only fill NULL values;
         # existing administrator data is preserved.
+        await conn.exec_driver_sql("UPDATE users SET role = COALESCE(role, 'PLAYER')")
+        await conn.exec_driver_sql("UPDATE users SET active = COALESCE(active, FALSE)")
+        await conn.exec_driver_sql("UPDATE users SET archived = COALESCE(archived, FALSE)")
+        await conn.exec_driver_sql("UPDATE users SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)")
+        await conn.exec_driver_sql("UPDATE applications SET status = COALESCE(status, 'PENDING')")
+        await conn.exec_driver_sql("UPDATE applications SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)")
+        await conn.exec_driver_sql("UPDATE criteria SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)")
+        await conn.exec_driver_sql("UPDATE reports SET status = COALESCE(status, 'PENDING')")
+        await conn.exec_driver_sql("UPDATE reports SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)")
+
         await conn.exec_driver_sql(
             "UPDATE organizations SET name = COALESCE(name, 'Организация ' || id::text)"
         )
@@ -1014,143 +1129,66 @@ import logging
 from contextlib import suppress
 
 import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("nemazing")
-
 _polling_task: Optional[asyncio.Task] = None
 
-
 async def _run_bot_polling():
-    """Run Telegram polling independently from the FastAPI web server."""
     if not bot:
         logger.warning("BOT_TOKEN is not configured; Telegram polling is disabled.")
         return
-
     while True:
         try:
             logger.info("Starting Telegram bot polling...")
             await bot.delete_webhook(drop_pending_updates=False)
-            await dp.start_polling(
-                bot,
-                allowed_updates=dp.resolve_used_update_types(),
-            )
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Telegram polling crashed; retrying in 5 seconds.")
             await asyncio.sleep(5)
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _polling_task
-
     logger.info("NEMAZING RP starting...")
-    logger.info("DATABASE_URL scheme: %s", DATABASE_URL.split(":", 1)[0])
-
-    # Database errors must be visible in Render logs but must not prevent
-    # the HTTP health endpoint from opening a port.
     try:
         await init_db()
         logger.info("Database initialization completed.")
     except Exception:
         logger.exception("Database initialization failed.")
-
     if bot:
         _polling_task = asyncio.create_task(_run_bot_polling())
-        logger.info("Telegram polling task created.")
-    else:
-        logger.warning("Telegram bot is disabled because BOT_TOKEN is empty.")
-
     yield
-
-    logger.info("NEMAZING RP shutting down...")
-
     if _polling_task:
         _polling_task.cancel()
         with suppress(asyncio.CancelledError):
             await _polling_task
-        _polling_task = None
-
     if bot:
         with suppress(Exception):
             await bot.session.close()
-
     with suppress(Exception):
         await engine.dispose()
 
-
-app = FastAPI(
-    title="NEMAZING RP",
-    version="1.0.0",
-    description="NEMAZING RP personnel management Telegram bot",
-    lifespan=lifespan,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+app = FastAPI(title="NEMAZING RP", version="1.1.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/")
 async def root():
-    return {
-        "service": "NEMAZING RP",
-        "version": "1.0.0",
-        "status": "online",
-        "message": "NEMAZING RP API is running",
-        "health": "/health",
-        "api_health": "/api/health",
-    }
-
+    return {"service":"NEMAZING RP","version":"1.1.0","status":"online","health":"/health","api_health":"/api/health"}
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "service": "nemazing-rp",
-    }
-
+    return {"status":"ok","service":"nemazing-rp"}
 
 @app.get("/api/health")
 async def api_health():
-    return {
-        "status": "ok",
-        "service": "nemazing-rp",
-        "bot_configured": bool(BOT_TOKEN),
-        "database_configured": bool(DATABASE_URL),
-    }
-
+    return {"status":"ok","service":"nemazing-rp","bot_configured":bool(BOT_TOKEN),"database_configured":bool(DATABASE_URL)}
 
 @app.get("/api/status")
 async def api_status():
-    polling_running = bool(_polling_task and not _polling_task.done())
-    return {
-        "service": "NEMAZING RP",
-        "status": "online",
-        "bot_configured": bool(BOT_TOKEN),
-        "polling_running": polling_running,
-        "owner_configured": bool(OWNER_ID),
-        "channel": CHANNEL_USERNAME,
-    }
-
+    return {"service":"NEMAZING RP","status":"online","bot_configured":bool(BOT_TOKEN),"polling_running":bool(_polling_task and not _polling_task.done()),"owner_configured":bool(OWNER_ID),"channel":CHANNEL_USERNAME}
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    logger.info("Starting Uvicorn on 0.0.0.0:%s", port)
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-        log_level="info",
-    )
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")), log_level="info")
