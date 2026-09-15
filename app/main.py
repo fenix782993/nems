@@ -1039,12 +1039,21 @@ async def criterion_confirm(call: CallbackQuery, state: FSMContext):
     if not all(str(data.get(k, "")).strip() for k in required):
         await call.answer("Критерий заполнен не полностью", show_alert=True)
         return
-    async with SessionLocal() as session:
-        session.add(Criterion(
-            organization=data["organization"], rank=data["rank"], title=data["title"],
-            description=data["description"], created_at=utcnow()
-        ))
-        await session.commit()
+    try:
+        async with SessionLocal() as session:
+            session.add(Criterion(
+                organization=str(data["organization"]).strip(),
+                rank=str(data["rank"]).strip(),
+                title=str(data["title"]).strip(),
+                description=str(data["description"]).strip(),
+                created_at=utcnow(),
+            ))
+            await session.commit()
+    except Exception:
+        import logging
+        logging.getLogger("nemazing").exception("Failed to save criterion")
+        await call.answer("Не удалось сохранить критерий. Проверьте базу данных.", show_alert=True)
+        return
     await state.clear()
     await edit_page(call, "✅ Критерий сохранён владельцем и опубликован в разделе «Критерии».\n\nВладелец также проверяет все рапорты на соответствие этим требованиям.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📌 Критерии", callback_data="admin_criteria")], [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")]]))
     await call.answer("Критерий добавлен")
@@ -1417,11 +1426,14 @@ async def _migrate_schema():
             for table in Base.metadata.sorted_tables
         }
         for table_name, known_columns in current_tables.items():
+            # exec_driver_sql() sends SQL directly to asyncpg, so SQLAlchemy
+            # bind syntax (:t) is NOT available here. Table names come only
+            # from Base.metadata, therefore quoting them directly is safe.
+            safe_table = table_name.replace("'", "''")
             rows = (await conn.exec_driver_sql(
                 "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema='public' AND table_name=:t "
-                "AND is_nullable='NO' AND column_name <> 'id'",
-                {"t": table_name},
+                f"WHERE table_schema='public' AND table_name='{safe_table}' "
+                "AND is_nullable='NO' AND column_name <> 'id'"
             )).fetchall()
             for (column_name,) in rows:
                 if column_name not in known_columns:

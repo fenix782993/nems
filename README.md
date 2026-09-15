@@ -49,3 +49,6 @@ V7: PostgreSQL legacy organizations.auto_ban_on_leave migration fixed.
 
 ## V7 — one-shot deployment
 This build contains an automatic PostgreSQL compatibility pass. You do not need to manually transfer, rename, or edit legacy tables. Deploy the repository and restart Render; the bot repairs legacy NOT NULL columns automatically while preserving existing rows.
+
+
+V8 FIX: corrected PostgreSQL information_schema migration query (no unsupported :t bind in exec_driver_sql) and hardened criterion saving.
