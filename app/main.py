@@ -2,7 +2,7 @@ import asyncio
 import io
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -57,7 +57,9 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 def utcnow() -> datetime:
     # PostgreSQL columns are TIMESTAMP WITHOUT TIME ZONE in this project.
     # Keep the datetime naive and consistently UTC.
-    return datetime.utcnow()
+    # PostgreSQL schema uses TIMESTAMP WITHOUT TIME ZONE.
+    # Use a non-deprecated UTC value without tzinfo.
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Base(AsyncAttrs, DeclarativeBase):
@@ -1293,6 +1295,10 @@ async def _migrate_schema():
         # organizations
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS name VARCHAR(255)",
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS code VARCHAR(50)",
+        # Very old NEMAZING databases had a required `title` column which is
+        # no longer used by the current ORM. Give it a safe database default
+        # so inserts made by the current model do not fail with NOT NULL.
+        "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS title VARCHAR(255)",
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS chat_id BIGINT",
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS invite_link TEXT",
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
@@ -1357,6 +1363,18 @@ async def _migrate_schema():
         )
         await conn.exec_driver_sql(
             "UPDATE organizations SET code = COALESCE(code, 'ORG' || id::text)"
+        )
+        # Compatibility with the legacy organizations schema. The current
+        # application does not use title, but old Render tables may keep it
+        # as NOT NULL. Populate existing rows and make future inserts safe.
+        await conn.exec_driver_sql(
+            "UPDATE organizations SET title = COALESCE(title, name, code, 'Организация ' || id::text)"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE organizations ALTER COLUMN title SET DEFAULT 'Организация'"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE organizations ALTER COLUMN title DROP NOT NULL"
         )
         await conn.exec_driver_sql(
             "UPDATE organizations SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)"
