@@ -1,10 +1,8 @@
 services:
   - type: web
-    name: nemazing-rp-bot
-    env: python
+    name: nemazing-rp
+    runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m app.main
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.10
@@ -16,3 +14,6 @@ services:
         value: "@nemazing"
       - key: DATABASE_URL
         sync: false
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.main
+    healthCheckPath: /health
