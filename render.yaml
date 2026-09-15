@@ -3,17 +3,23 @@ services:
     name: nemazing-rp
     runtime: python
     plan: free
+
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+
+    startCommand: python3 -m app.main
+
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.10
+
       - key: BOT_TOKEN
         sync: false
+
       - key: OWNER_ID
         sync: false
+
       - key: CHANNEL_USERNAME
         value: "@nemazing"
+
       - key: DATABASE_URL
-        sync: false
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m app.main
-    healthCheckPath: /health
+        value: "sqlite+aiosqlite:///./data/nemazing.db"
