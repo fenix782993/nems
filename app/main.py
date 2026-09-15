@@ -937,70 +937,71 @@ async def member_update(event: ChatMemberUpdated):
         await session.commit()
 
 
+async def _migrate_schema():
+    """Small idempotent migration for existing Render/PostgreSQL databases.
+
+    SQLAlchemy create_all() does not add missing columns to tables that already
+    exist. The project previously created an organizations table with an older
+    schema, so we explicitly add the current columns before ORM queries run.
+    """
+    if DATABASE_URL.startswith("sqlite"):
+        return
+
+    statements = [
+        "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS name VARCHAR(255)",
+        "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS code VARCHAR(50)",
+        "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS chat_id BIGINT",
+        "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS invite_link TEXT",
+        "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
+    ]
+    async with engine.begin() as conn:
+        for sql in statements:
+            await conn.exec_driver_sql(sql)
+
+        # Repair rows created by an older version. We only fill NULL values;
+        # existing administrator data is preserved.
+        await conn.exec_driver_sql(
+            "UPDATE organizations SET name = COALESCE(name, 'Организация ' || id::text)"
+        )
+        await conn.exec_driver_sql(
+            "UPDATE organizations SET code = COALESCE(code, 'ORG' || id::text)"
+        )
+        await conn.exec_driver_sql(
+            "UPDATE organizations SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)"
+        )
+
+
 async def init_db():
+    # First create any completely new tables.
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Then migrate old Render/PostgreSQL tables before selecting through ORM.
+    await _migrate_schema()
+
     async with SessionLocal() as session:
         existing = (await session.execute(select(Organization))).scalars().all()
-        by_name = {x.name for x in existing}
+        by_name = {x.name for x in existing if x.name}
         defaults = [("ФСБ", "FSB"), ("ВЧ", "VC"), ("ЕСС", "ESS"), ("УМВД", "UMVD")]
         for name, code in defaults:
             if name not in by_name:
                 session.add(Organization(name=name, code=code, created_at=utcnow()))
+
         if OWNER_ID:
             owner = await get_user(session, OWNER_ID)
             if owner is None:
-                session.add(User(telegram_id=OWNER_ID, role="OWNER", active=True, archived=False, created_at=utcnow()))
+                session.add(
+                    User(
+                        telegram_id=OWNER_ID,
+                        role="OWNER",
+                        active=True,
+                        archived=False,
+                        created_at=utcnow(),
+                    )
+                )
             else:
                 owner.role = "OWNER"
                 owner.active = True
                 owner.archived = False
+
         await session.commit()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await init_db()
-    polling_task = None
-    if bot:
-        polling_task = asyncio.create_task(dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member"]))
-    yield
-    if polling_task:
-        polling_task.cancel()
-        try:
-            await polling_task
-        except asyncio.CancelledError:
-            pass
-    if bot:
-        await bot.session.close()
-    await engine.dispose()
-
-
-app = FastAPI(title="NEMAZING RP", version="2.0.0", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.get("/")
-async def root():
-    return {"service": "NEMAZING RP", "version": "2.0.0", "status": "online", "health": "/health"}
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "nemazing-rp-bot"}
-
-
-@app.get("/api/health")
-async def api_health():
-    return {"status": "ok", "service": "nemazing-rp-bot"}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
