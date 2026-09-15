@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from aiogram import Bot, Dispatcher, F
-from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -365,15 +364,6 @@ async def ensure_user(session, tg_id, username, first_name):
     await session.refresh(user)
     return user
 
-async def subscribed(user_id: int) -> bool:
-    if not bot or not CHANNEL_USERNAME:
-        return True
-    try:
-        m = await bot.get_chat_member(CHANNEL_USERNAME, user_id)
-        return m.status in {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
-    except Exception:
-        return False
-
 async def send_home(message: Message):
     async with SessionLocal() as session:
         user = await ensure_user(session, message.from_user.id, message.from_user.username, message.from_user.first_name)
@@ -387,25 +377,18 @@ async def send_home(message: Message):
 
 @dp.message(CommandStart())
 async def start(message: Message):
-    if not message.from_user: return
-    async with SessionLocal() as session:
-        await ensure_user(session, message.from_user.id, message.from_user.username, message.from_user.first_name)
-    if not await subscribed(message.from_user.id) and not is_admin(message.from_user.id):
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Подписаться", url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}")],
-            [InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_sub")],
-        ])
-        await message.answer("Для входа в NEMAZING RP сначала подпишитесь на канал.", reply_markup=kb)
+    """Открывает главное меню без обязательной подписки на канал."""
+    if not message.from_user:
         return
     await send_home(message)
 
+
 @dp.callback_query(F.data == "check_sub")
 async def check_sub(call):
-    if await subscribed(call.from_user.id) or is_admin(call.from_user.id):
-        await call.answer("Подписка подтверждена")
-        await edit_page(call, "Доступ открыт.", menu_keyboard(is_admin(call.from_user.id)))
-    else:
-        await call.answer("Подписка не найдена", show_alert=True)
+    # Оставлено для старых сообщений/кнопок, но подписка больше не требуется.
+    await call.answer("Доступ открыт")
+    await edit_page(call, "Доступ открыт.", menu_keyboard(is_admin(call.from_user.id)))
+
 
 @dp.callback_query(F.data == "home")
 async def home(call, state: FSMContext):
@@ -418,8 +401,6 @@ async def home(call, state: FSMContext):
 
 @dp.callback_query(F.data == "apply")
 async def apply_start(call, state):
-    if not await subscribed(call.from_user.id) and not is_admin(call.from_user.id):
-        await call.answer("Сначала подпишитесь на канал", show_alert=True); return
     await state.clear(); await state.set_state(ApplyStates.organization)
     await edit_page(call, "📝 ПОДАЧА ЗАЯВЛЕНИЯ\n\nВыберите организацию:", org_keyboard("applyorg"))
     await call.answer()
@@ -1386,7 +1367,7 @@ async def services(call):
 
 @dp.callback_query(F.data=="help")
 async def help_page(call):
-    await edit_page(call,"❓ ПОМОЩЬ\n\n1. Подпишитесь на канал.\n2. Подайте заявление.\n3. Дождитесь решения владельца.\n4. После одобрения получите персональную ссылку в чат.\n5. Смотрите критерии как файловую структуру и подавайте рапорт.\n6. В рапорт можно приложить фото, видео, документы и ссылки.",page_kb([])); await call.answer()
+    await edit_page(call,"❓ ПОМОЩЬ\n\n1. Откройте бота и выберите нужный раздел.\n2. Подайте заявление.\n3. Дождитесь решения владельца.\n4. После одобрения получите персональную ссылку в чат.\n5. Смотрите критерии как файловую структуру и подавайте рапорт.\n6. В рапорт можно приложить фото, видео, документы и ссылки.",page_kb([])); await call.answer()
 
 # -------------------- DB MIGRATION --------------------
 
@@ -1496,7 +1477,7 @@ async def api_health(): return {"status":"ok","service":"nemazing-rp","bot_confi
 async def api_status():
     return {"service":"NEMAZING RP","status":"online","version":"13.0.0","bot_configured":bool(BOT_TOKEN),
             "polling_running":bool(_polling_task and not _polling_task.done()),"owner_configured":bool(OWNER_ID),
-            "channel":CHANNEL_USERNAME}
+            "subscription_required":False}
 
 if __name__=="__main__":
     uvicorn.run(app,host="0.0.0.0",port=int(os.getenv("PORT","10000")),log_level="info")
