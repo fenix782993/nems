@@ -2,7 +2,7 @@ import asyncio
 import io
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -119,7 +119,9 @@ class Criterion(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     organization: Mapped[str] = mapped_column(String(255))
-    rank: Mapped[str] = mapped_column(String(255))
+    rank: Mapped[str] = mapped_column(String(255), default="")
+    from_rank: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    to_rank: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     title: Mapped[str] = mapped_column(String(255))
     description: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -173,7 +175,8 @@ class ReportStates(StatesGroup):
 
 class AdminCriterionStates(StatesGroup):
     organization = State()
-    rank = State()
+    from_rank = State()
+    to_rank = State()
     title = State()
     description = State()
     confirm = State()
@@ -489,21 +492,61 @@ async def approve_app(call: CallbackQuery):
         app.reviewed_at = utcnow()
         org_result = await session.execute(select(Organization).where(Organization.name == app.organization))
         org = org_result.scalar_one_or_none()
-        invite = org.invite_link if org else None
         chat_id = org.chat_id if org else None
         await session.commit()
+
     await call.message.edit_reply_markup(reply_markup=None)
     await call.message.answer(f"✅ Заявление #{app_id} одобрено.")
+
     if bot:
         text = f"✅ Заявление одобрено\n\nВас приняли в {app.organization}."
-        if invite:
-            text += f"\n\n🔐 Ссылка в закрытый чат:\n{invite}"
-        elif chat_id:
-            text += "\n\nАдминистратор ещё не настроил персональную ссылку."
+
+        if chat_id:
+            try:
+                # Создаём именно ПЕРСОНАЛЬНУЮ ссылку Telegram: одно использование,
+                # срок 24 часа. Постоянная ссылка /setinvite больше не нужна.
+                personal_invite = await bot.create_chat_invite_link(
+                    chat_id=chat_id,
+                    name=f"NEMAZING #{app_id} user {user.telegram_id}",
+                    expire_date=datetime.now(timezone.utc) + timedelta(hours=24),
+                    member_limit=1,
+                    creates_join_request=False,
+                )
+                text += (
+                    "\n\n🔐 Ваша персональная ссылка в закрытый чат:"
+                    f"\n{personal_invite.invite_link}"
+                    "\n\nСсылка одноразовая и действует 24 часа."
+                )
+            except Exception as e:
+                # Важное диагностическое сообщение владельцу: если Telegram
+                # не разрешил создание ссылки, причина будет видна в Render.
+                print(f"[INVITE ERROR] org={app.organization} chat_id={chat_id}: {e}")
+                text += (
+                    "\n\n⚠️ Не удалось автоматически создать персональную ссылку."
+                    "\nПроверьте, что бот является администратором этого чата и имеет "
+                    "право приглашать пользователей."
+                )
+                try:
+                    await bot.send_message(
+                        OWNER_ID,
+                        "⚠️ Ошибка создания персональной ссылки\n\n"
+                        f"Организация: {app.organization}\n"
+                        f"chat_id: {chat_id}\n"
+                        f"Пользователь: {user.telegram_id}\n"
+                        f"Ошибка Telegram: {e}"
+                    )
+                except Exception:
+                    pass
+        else:
+            text += (
+                "\n\n⚠️ Для этой организации ещё не указан chat_id."
+                "\nВыполните: /setchat ФСБ -100123456789"
+            )
+
         try:
             await bot.send_message(user.telegram_id, text)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[USER NOTIFY ERROR] {user.telegram_id}: {e}")
     await call.answer("Одобрено")
 
 
@@ -570,14 +613,27 @@ async def organization(call: CallbackQuery):
 @dp.callback_query(F.data == "criteria")
 async def criteria(call: CallbackQuery):
     async with SessionLocal() as session:
-        result = await session.execute(select(Criterion).order_by(Criterion.organization, Criterion.id))
+        result = await session.execute(select(Criterion).order_by(Criterion.organization, Criterion.from_rank, Criterion.to_rank, Criterion.id))
         items = result.scalars().all()
     if not items:
         text = "📋 Критерии повышения\n\nКритерии пока не добавлены владельцем."
     else:
-        parts = ["📋 Критерии повышения"]
-        for c in items[:50]:
-            parts.append(f"\n{c.organization} — {c.rank}\n{c.title}\n{c.description}")
+        parts = ["📋 КРИТЕРИИ ПОВЫШЕНИЯ", "━━━━━━━━━━━━━━━━━━"]
+        current_org = None
+        current_from = None
+        for c in items[:100]:
+            if c.organization != current_org:
+                current_org = c.organization
+                current_from = None
+                parts.append(f"\n📁 {c.organization}")
+            src = c.from_rank or c.rank or "—"
+            dst = c.to_rank or "—"
+            if src != current_from:
+                current_from = src
+                parts.append(f"  📂 {src} → {dst}")
+            else:
+                parts.append(f"  └ {src} → {dst}")
+            parts.append(f"     📌 {c.title}\n     📝 {c.description}")
         text = "\n".join(parts)
     await edit_page(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="home")]]))
     await call.answer()
@@ -939,7 +995,7 @@ async def admin_orgs(call: CallbackQuery):
         orgs = result.scalars().all()
     lines = ["🏛 Организации"]
     for o in orgs:
-        lines.append(f"• {o.name} | chat: {o.chat_id or '—'} | invite: {'есть' if o.invite_link else 'нет'}")
+        lines.append(f"• {o.name} | chat: {o.chat_id or '—'} | персональные ссылки: автоматически")
     await edit_page(call, "\n".join(lines), reply_markup=admin_keyboard())
     await call.answer()
 
@@ -950,12 +1006,25 @@ async def admin_criteria(call: CallbackQuery):
         await call.answer("Только владелец управляет критериями", show_alert=True)
         return
     async with SessionLocal() as session:
-        result = await session.execute(select(Criterion).order_by(Criterion.id.desc()).limit(50))
+        result = await session.execute(select(Criterion).order_by(Criterion.organization, Criterion.from_rank, Criterion.to_rank, Criterion.id).limit(100))
         criteria_items = result.scalars().all()
     lines = ["📌 КРИТЕРИИ ПОВЫШЕНИЯ", "━━━━━━━━━━━━━━━━━━"]
     if criteria_items:
+        current_org = None
+        current_from = None
         for c in criteria_items:
-            lines.append(f"#{c.id} • {c.organization} • {c.rank}\n{c.title}\n{c.description}\n")
+            if c.organization != current_org:
+                current_org = c.organization
+                current_from = None
+                lines.append(f"\n📁 {c.organization}")
+            src = c.from_rank or c.rank or "—"
+            dst = c.to_rank or "—"
+            if src != current_from:
+                current_from = src
+                lines.append(f"  📂 {src} → {dst}")
+            else:
+                lines.append(f"  └ {src} → {dst}")
+            lines.append(f"     #{c.id} {c.title}\n     📝 {c.description}")
     else:
         lines.append("Критерии ещё не добавлены.")
     kb_rows = [[InlineKeyboardButton(text="➕ Добавить критерий", callback_data="criterion_add")]]
@@ -978,20 +1047,31 @@ async def criterion_add(call: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("critorg:"), AdminCriterionStates.organization)
 async def criterion_org(call: CallbackQuery, state: FSMContext):
     await state.update_data(organization=call.data.split(":", 1)[1])
-    await state.set_state(AdminCriterionStates.rank)
-    await edit_page(call, "Введите звание в игре, для которого действует критерий:\n\nНапример: Лейтенант")
+    await state.set_state(AdminCriterionStates.from_rank)
+    await edit_page(call, "📁 НОВАЯ ПАПКА КРИТЕРИЯ\n\nВведите звание, С КОТОРОГО повышаем:\n\nНапример: Лейтенант")
     await call.answer()
 
 
-@dp.message(AdminCriterionStates.rank)
-async def criterion_rank(message: Message, state: FSMContext):
+@dp.message(AdminCriterionStates.from_rank)
+async def criterion_from_rank(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     if not text:
-        await message.answer("Введите звание в игре.")
+        await message.answer("Введите исходное звание в игре.")
         return
-    await state.update_data(rank=text)
+    await state.update_data(from_rank=text)
+    await state.set_state(AdminCriterionStates.to_rank)
+    await message.answer("Введите звание, НА КОТОРОЕ повышаем:\n\nНапример: Капитан")
+
+
+@dp.message(AdminCriterionStates.to_rank)
+async def criterion_to_rank(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Введите новое звание в игре.")
+        return
+    await state.update_data(to_rank=text)
     await state.set_state(AdminCriterionStates.title)
-    await message.answer("Введите название критерия:\n\nНапример: Повышение с Лейтенанта на Капитана")
+    await message.answer("Введите название критерия:\n\nНапример: Повышение Лейтенант → Капитан")
 
 
 @dp.message(AdminCriterionStates.title)
@@ -1018,7 +1098,7 @@ async def criterion_description(message: Message, state: FSMContext):
         "📌 ПРОВЕРКА КРИТЕРИЯ\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"🏛 Организация: {data['organization']}\n"
-        f"🎖 Звание: {data['rank']}\n"
+        f"📂 Повышение: {data['from_rank']} → {data['to_rank']}\n"
         f"📋 Название: {data['title']}\n"
         f"📝 Требования: {data['description']}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -1035,7 +1115,7 @@ async def criterion_confirm(call: CallbackQuery, state: FSMContext):
         await call.answer("Только владелец может сохранять критерии", show_alert=True)
         return
     data = await state.get_data()
-    required = ("organization", "rank", "title", "description")
+    required = ("organization", "from_rank", "to_rank", "title", "description")
     if not all(str(data.get(k, "")).strip() for k in required):
         await call.answer("Критерий заполнен не полностью", show_alert=True)
         return
@@ -1043,7 +1123,9 @@ async def criterion_confirm(call: CallbackQuery, state: FSMContext):
         async with SessionLocal() as session:
             session.add(Criterion(
                 organization=str(data["organization"]).strip(),
-                rank=str(data["rank"]).strip(),
+                rank=str(data["from_rank"]).strip(),
+                from_rank=str(data["from_rank"]).strip(),
+                to_rank=str(data["to_rank"]).strip(),
                 title=str(data["title"]).strip(),
                 description=str(data["description"]).strip(),
                 created_at=utcnow(),
@@ -1136,20 +1218,13 @@ async def setchat(message: Message):
 async def setinvite(message: Message):
     if not is_admin(message.from_user.id):
         return
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 3:
-        await message.answer("Использование: /setinvite ФСБ https://t.me/+...")
-        return
-    org_name, invite = parts[1], parts[2]
-    async with SessionLocal() as session:
-        result = await session.execute(select(Organization).where(Organization.name == org_name))
-        org = result.scalar_one_or_none()
-        if not org:
-            await message.answer("Организация не найдена")
-            return
-        org.invite_link = invite
-        await session.commit()
-    await message.answer("✅ Ссылка сохранена")
+    await message.answer(
+        "ℹ️ Постоянная ссылка больше не требуется.\n\n"
+        "После одобрения бот сам создаёт персональную ссылку на 1 вход "
+        "сроком 24 часа.\n\n"
+        "Для настройки достаточно один раз указать chat_id организации:\n"
+        "/setchat ФСБ -100123456789"
+    )
 
 
 @dp.message(Command("setrank"))
@@ -1333,6 +1408,8 @@ async def _migrate_schema():
         # criteria
         "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS organization VARCHAR(255)",
         "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS rank VARCHAR(255)",
+        "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS from_rank VARCHAR(255)",
+        "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS to_rank VARCHAR(255)",
         "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS title VARCHAR(255)",
         "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS description TEXT",
         "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
