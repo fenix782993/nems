@@ -83,6 +83,10 @@ class User(Base):
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     joined_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    archived_organization: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    archived_rank: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    archived_position: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    archived_department: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -133,6 +137,9 @@ class Report(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, index=True)
     source_organization: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    criterion_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    criterion_from_rank: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    criterion_to_rank: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     to_whom: Mapped[str] = mapped_column(String(255))
     from_whom: Mapped[str] = mapped_column(String(255))
     task_points: Mapped[str] = mapped_column(Text)
@@ -229,9 +236,11 @@ def menu_keyboard(admin: bool = False) -> InlineKeyboardMarkup:
 def organizations_keyboard(prefix: str = "org") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛡 ФСБ", callback_data=f"{prefix}:ФСБ"), InlineKeyboardButton(text="🎖 ВЧ", callback_data=f"{prefix}:ВЧ")],
-        [InlineKeyboardButton(text="🚑 ЕСС", callback_data=f"{prefix}:ЕСС"), InlineKeyboardButton(text="🚔 УМВД", callback_data=f"{prefix}:УМВД")],
+        [InlineKeyboardButton(text="🏛 УМВД", callback_data=f"{prefix}:УМВД"), InlineKeyboardButton(text="🚓 ДПС", callback_data=f"{prefix}:ДПС")],
+        [InlineKeyboardButton(text="🚑 ЕСС", callback_data=f"{prefix}:ЕСС"), InlineKeyboardButton(text="🏛 Правительство", callback_data=f"{prefix}:Правительство")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
     ])
+
 
 def report_recipients_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -244,12 +253,18 @@ def report_recipients_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def report_org_keyboard() -> InlineKeyboardMarkup:
+    labels={"ВЧ":"🎖 ВЧ","ФСБ":"🛡 ФСБ","УМВД":"🏛 УМВД","ДПС":"🚓 ДПС","ЕСС":"🚑 ЕСС","Правительство":"🏛 Правительство"}
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=labels[o], callback_data=f"report_org:{o}")] for o in labels] + [[InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")]])
+
 def criterion_org_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛡 ФСБ", callback_data="critorg:ФСБ"), InlineKeyboardButton(text="🎖 ВЧ", callback_data="critorg:ВЧ")],
-        [InlineKeyboardButton(text="🚑 ЕСС", callback_data="critorg:ЕСС"), InlineKeyboardButton(text="🚔 УМВД", callback_data="critorg:УМВД")],
+        [InlineKeyboardButton(text="🏛 УМВД", callback_data="critorg:УМВД"), InlineKeyboardButton(text="🚓 ДПС", callback_data="critorg:ДПС")],
+        [InlineKeyboardButton(text="🚑 ЕСС", callback_data="critorg:ЕСС"), InlineKeyboardButton(text="🏛 Правительство", callback_data="critorg:Правительство")],
         [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_criteria")],
     ])
+
 
 
 def admin_keyboard() -> InlineKeyboardMarkup:
@@ -613,152 +628,150 @@ async def organization(call: CallbackQuery):
 @dp.callback_query(F.data == "criteria")
 async def criteria(call: CallbackQuery):
     async with SessionLocal() as session:
-        result = await session.execute(select(Criterion).order_by(Criterion.organization, Criterion.from_rank, Criterion.to_rank, Criterion.id))
-        items = result.scalars().all()
-    if not items:
-        text = "📋 Критерии повышения\n\nКритерии пока не добавлены владельцем."
-    else:
-        parts = ["📋 КРИТЕРИИ ПОВЫШЕНИЯ", "━━━━━━━━━━━━━━━━━━"]
-        current_org = None
-        current_from = None
-        for c in items[:100]:
-            if c.organization != current_org:
-                current_org = c.organization
-                current_from = None
-                parts.append(f"\n📁 {c.organization}")
-            src = c.from_rank or c.rank or "—"
-            dst = c.to_rank or "—"
-            if src != current_from:
-                current_from = src
-                parts.append(f"  📂 {src} → {dst}")
-            else:
-                parts.append(f"  └ {src} → {dst}")
-            parts.append(f"     📌 {c.title}\n     📝 {c.description}")
-        text = "\n".join(parts)
-    await edit_page(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="home")]]))
+        items = (await session.execute(select(Criterion).order_by(Criterion.organization, Criterion.from_rank, Criterion.to_rank, Criterion.id))).scalars().all()
+    orgs = ["ВЧ", "ФСБ", "УМВД", "ДПС", "ЕСС", "Правительство"]
+    rows = []
+    for org in orgs:
+        rows.append([InlineKeyboardButton(text={"ВЧ":"🎖 ВЧ","ФСБ":"🛡 ФСБ","УМВД":"🏛 УМВД","ДПС":"🚓 ДПС","ЕСС":"🚑 ЕСС","Правительство":"🏛 Правительство"}[org], callback_data=f"criteria_org:{org}")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")])
+    await edit_page(call, "📋 КРИТЕРИИ ПОВЫШЕНИЯ\n━━━━━━━━━━━━━━━━━━\nВыберите организацию:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await call.answer()
 
+@dp.callback_query(F.data.startswith("criteria_org:"))
+async def criteria_org(call: CallbackQuery):
+    org = call.data.split(":",1)[1]
+    async with SessionLocal() as session:
+        items = (await session.execute(select(Criterion).where(Criterion.organization == org).order_by(Criterion.from_rank, Criterion.to_rank, Criterion.id))).scalars().all()
+    if not items:
+        text = f"📁 {org}\n━━━━━━━━━━━━━━━━━━\nКритерии для этой организации пока не добавлены."
+    else:
+        text = f"📁 {org}\n━━━━━━━━━━━━━━━━━━\n" + "\n\n".join(
+            f"📂 {c.from_rank or c.rank or '—'} → {c.to_rank or '—'}\n📌 {c.title}\n📝 {c.description}" for c in items
+        )
+    await edit_page(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Все организации", callback_data="criteria")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+    ]))
+    await call.answer()
 
 @dp.callback_query(F.data == "report")
 async def report_start(call: CallbackQuery, state: FSMContext):
     async with SessionLocal() as session:
         user = await get_user(session, call.from_user.id)
-    if not user or not user.active or user.archived:
-        await call.answer("Рапорт доступен только действующему составу", show_alert=True)
+    if not user or not user.active or user.archived or not user.organization:
+        await call.answer("Рапорт доступен только действующему сотруднику организации", show_alert=True)
         return
     await state.clear()
+    await state.update_data(source_organization=user.organization)
     await state.set_state(ReportStates.to_whom)
-    await edit_page(
-        call,
-        "📄 РАПОРТ НА ПОВЫШЕНИЕ\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "Выберите руководителя, которому адресуется рапорт:",
-        reply_markup=report_recipients_keyboard(),
-    )
+    await edit_page(call, f"📄 РАПОРТ НА ПОВЫШЕНИЕ\n━━━━━━━━━━━━━━━━━━\n🏛 Организация: {user.organization}\n\nВыберите организацию/раздел критериев:", reply_markup=report_org_keyboard())
     await call.answer()
 
-
-@dp.callback_query(F.data.startswith("reportto:"), ReportStates.to_whom)
-async def report_to_select(call: CallbackQuery, state: FSMContext):
-    recipient = call.data.split(":", 1)[1].strip()
-    await state.update_data(to_whom=recipient)
+@dp.callback_query(F.data.startswith("report_org:"), ReportStates.to_whom)
+async def report_org_select(call: CallbackQuery, state: FSMContext):
+    org = call.data.split(":",1)[1]
     async with SessionLocal() as session:
         user = await get_user(session, call.from_user.id)
-    source_org = user.organization if user else None
-    await state.update_data(source_organization=source_org or "Не указана")
-    await state.set_state(ReportStates.from_whom)
-    await edit_page(
-        call,
-        f"📄 РАПОРТ НА ПОВЫШЕНИЕ\n\n"
-        f"Кому: {recipient}\n"
-        f"От кого: {user.nickname if user and user.nickname else call.from_user.first_name or 'Сотрудник'}\n\n"
-        "Подтвердите отправителя или укажите его ФИО/звание в игре:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👤 Использовать мой профиль", callback_data="reportfrom:self")],
-            [InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="reportfrom:manual")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="home")],
-        ]),
-    )
+        items = (await session.execute(select(Criterion).where(Criterion.organization == org).order_by(Criterion.from_rank, Criterion.to_rank, Criterion.id))).scalars().all()
+    if not user or user.organization != org:
+        await call.answer("Вы можете отправлять рапорт только по своей организации", show_alert=True)
+        return
+    if not items:
+        await call.answer("Для этой организации критерии ещё не настроены", show_alert=True)
+        return
+    await state.update_data(source_organization=org)
+    rows = []
+    for c in items:
+        rows.append([InlineKeyboardButton(text=f"{c.from_rank or c.rank or '—'} → {c.to_rank or '—'}", callback_data=f"report_criterion:{c.id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="report")])
+    await edit_page(call, f"📁 КРИТЕРИИ — {org}\n━━━━━━━━━━━━━━━━━━\nВыберите повышение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await call.answer()
 
+@dp.callback_query(F.data.startswith("report_criterion:"), ReportStates.to_whom)
+async def report_criterion_select(call: CallbackQuery, state: FSMContext):
+    criterion_id = int(call.data.split(":",1)[1])
+    async with SessionLocal() as session:
+        c = await session.get(Criterion, criterion_id)
+        user = await get_user(session, call.from_user.id)
+    if not c or not user or user.organization != c.organization:
+        await call.answer("Критерий недоступен", show_alert=True)
+        return
+    src = c.from_rank or c.rank or "—"
+    dst = c.to_rank or "—"
+    await state.update_data(criterion_id=c.id, criterion_from_rank=src, criterion_to_rank=dst, to_whom=f"Руководителю {c.organization}")
+    await state.set_state(ReportStates.from_whom)
+    await edit_page(call, f"📋 КРИТЕРИЙ\n━━━━━━━━━━━━━━━━━━\n🏛 {c.organization}\n📈 {src} → {dst}\n📌 {c.title}\n📝 {c.description}\n\nПодтвердите отправителя:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Использовать мой профиль", callback_data="reportfrom:self")],
+        [InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="reportfrom:manual")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="home")],
+    ]))
+    await call.answer()
 
 @dp.callback_query(F.data == "reportfrom:self", ReportStates.from_whom)
 async def report_from_self(call: CallbackQuery, state: FSMContext):
     async with SessionLocal() as session:
         user = await get_user(session, call.from_user.id)
-    sender = ""
-    if user:
-        sender = user.nickname or user.first_name or f"Telegram ID {user.telegram_id}"
-        if user.rank:
-            sender = f"{sender} — {user.rank}"
+    sender = user.nickname or user.first_name or f"Telegram ID {user.telegram_id}"
+    if user.rank:
+        sender = f"{sender} — {user.rank}"
     await state.update_data(from_whom=sender)
     await state.set_state(ReportStates.task_points)
-    await edit_page(call, "Отправитель сохранён.\n\n📝 Укажите выполненные задачи и баллы:")
+    await edit_page(call, "👤 Отправитель сохранён.\n\n📝 Опишите выполненные задачи и баллы по критерию:")
     await call.answer()
-
 
 @dp.callback_query(F.data == "reportfrom:manual", ReportStates.from_whom)
 async def report_from_manual_start(call: CallbackQuery, state: FSMContext):
     await edit_page(call, "✍️ Введите ФИО / никнейм / звание отправителя:")
     await call.answer()
 
-
 @dp.message(ReportStates.from_whom)
 async def report_from_manual(message: Message, state: FSMContext):
-    text = (message.text or "").strip()
+    text=(message.text or "").strip()
     if not text:
         await message.answer("Введите отправителя текстом.")
         return
     await state.update_data(from_whom=text)
     await state.set_state(ReportStates.task_points)
-    await message.answer("📝 Укажите выполненные задачи и баллы:")
-
+    await message.answer("📝 Опишите выполненные задачи и баллы:")
 
 @dp.message(ReportStates.task_points)
 async def report_tasks(message: Message, state: FSMContext):
-    text = (message.text or "").strip()
+    text=(message.text or "").strip()
     if not text:
         await message.answer("Опишите выполненные задачи и укажите баллы.")
         return
     await state.update_data(task_points=text)
     await state.set_state(ReportStates.evidence)
-    await message.answer("🔗 Прикрепите ссылки/доказательства текстом (можно несколько):")
-
+    await message.answer("📎 Приложите фиксации/ссылки/доказательства текстом (можно несколько):")
 
 @dp.message(ReportStates.evidence)
 async def report_evidence(message: Message, state: FSMContext):
-    text = (message.text or "").strip()
+    text=(message.text or "").strip()
     if not text:
-        await message.answer("Укажите доказательства или ссылки. Если их нет, напишите: нет.")
+        await message.answer("Укажите фиксации или напишите: нет.")
         return
     await state.update_data(evidence=text)
     await state.set_state(ReportStates.signature)
     await message.answer("✍️ Введите подпись:")
 
-
 @dp.message(ReportStates.signature)
 async def report_signature(message: Message, state: FSMContext):
-    text = (message.text or "").strip()
+    text=(message.text or "").strip()
     if not text:
         await message.answer("Введите подпись.")
         return
     await state.update_data(signature=text)
-    data = await state.get_data()
+    data=await state.get_data()
     await state.set_state(ReportStates.confirm)
-    preview = (
-        "📄 ПРОВЕРКА РАПОРТА\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"🔢 Номер: будет присвоен автоматически\n"
-        f"🎯 Кому: {data.get('to_whom', '—')}\n"
-        f"👤 От кого: {data.get('from_whom', '—')}\n"
-        f"🏛 Организация: {data.get('source_organization', '—')}\n"
-        f"📋 Задачи и баллы: {data.get('task_points', '—')}\n"
-        f"🔗 Доказательства: {data.get('evidence', '—')}\n"
-        f"✍️ Подпись: {data.get('signature', '—')}\n\n"
-        "После отправки рапорт поступит владельцу на проверку."
-    )
     await message.answer(
-        preview,
+        "📄 ПРОВЕРКА РАПОРТА\n━━━━━━━━━━━━━━━━━━\n"
+        f"🏛 {data.get('source_organization','—')}\n"
+        f"📈 {data.get('criterion_from_rank','—')} → {data.get('criterion_to_rank','—')}\n"
+        f"🎯 {data.get('to_whom','—')}\n"
+        f"👤 {data.get('from_whom','—')}\n"
+        f"📋 Задачи/баллы: {data.get('task_points','—')}\n"
+        f"📎 Фиксации: {data.get('evidence','—')}\n"
+        f"✍️ Подпись: {data.get('signature','—')}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ ОТПРАВИТЬ РАПОРТ", callback_data="report_confirm")],
             [InlineKeyboardButton(text="🔄 Заполнить заново", callback_data="report_restart")],
@@ -766,71 +779,36 @@ async def report_signature(message: Message, state: FSMContext):
         ]),
     )
 
-
 @dp.callback_query(F.data == "report_restart")
 async def report_restart(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await state.set_state(ReportStates.to_whom)
-    await edit_page(call, "📄 РАПОРТ НА ПОВЫШЕНИЕ\n\nВыберите руководителя:", reply_markup=report_recipients_keyboard())
-    await call.answer()
-
+    await report_start(call, state)
 
 @dp.callback_query(F.data == "report_confirm")
 async def report_confirm(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    required = ("to_whom", "from_whom", "task_points", "evidence", "signature")
-    if not all(str(data.get(k, "")).strip() for k in required):
+    data=await state.get_data()
+    required=("criterion_id","source_organization","from_whom","task_points","evidence","signature")
+    if not all(str(data.get(k,"")).strip() for k in required):
         await call.answer("Рапорт заполнен не полностью", show_alert=True)
         return
     try:
         async with SessionLocal() as session:
-            user = await get_user(session, call.from_user.id)
-            if not user:
-                await call.answer("Пользователь не найден", show_alert=True)
+            user=await get_user(session, call.from_user.id)
+            if not user or not user.active or user.archived:
+                await call.answer("Вы больше не числитесь действующим сотрудником", show_alert=True)
                 return
-            # Report number is the DB ID, so it is always displayed as #1, #2, #3...
-            report = Report(
-                user_id=user.id,
-                source_organization=data.get("source_organization") or user.organization or "Не указана",
-                to_whom=data["to_whom"],
-                from_whom=data["from_whom"],
-                task_points=data["task_points"],
-                evidence=data["evidence"],
-                signature=data["signature"],
-                status="PENDING",
-                created_at=utcnow(),
-            )
+            report=Report(user_id=user.id, source_organization=data["source_organization"], criterion_id=int(data["criterion_id"]), criterion_from_rank=data.get("criterion_from_rank"), criterion_to_rank=data.get("criterion_to_rank"), to_whom=data.get("to_whom",""), from_whom=data["from_whom"], task_points=data["task_points"], evidence=data["evidence"], signature=data["signature"], status="PENDING", created_at=utcnow())
             session.add(report)
             await session.commit()
-            report_id = report.id
+            report_id=report.id
     except Exception:
-        logger.exception("Failed to create report for Telegram user %s", call.from_user.id)
-        await call.answer("Не удалось отправить рапорт. Попробуйте ещё раз через несколько секунд.", show_alert=True)
+        logger.exception("Failed to create report")
+        await call.answer("Не удалось отправить рапорт", show_alert=True)
         return
     await state.clear()
-    await edit_page(
-        call,
-        f"✅ РАПОРТ ПРИНЯТ СИСТЕМОЙ\n━━━━━━━━━━━━━━━━━━\n"
-        f"Номер: #{report_id}\n"
-        "Статус: На проверке у владельца\n\n"
-        "После проверки результат автоматически уйдёт в чат вашей организации.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")]]),
-    )
+    await edit_page(call, f"✅ РАПОРТ #{report_id} отправлен владельцу.\n\nПосле одобрения он автоматически появится в чате {data['source_organization']}.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")]]))
     if bot and OWNER_ID:
-        await bot.send_message(
-            OWNER_ID,
-            f"📄 НОВЫЙ РАПОРТ #{report_id}\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"🏛 От организации: {data.get('source_organization') or 'Не указана'}\n"
-            f"🎯 Кому: {data['to_whom']}\n"
-            f"👤 От кого: {data['from_whom']}\n"
-            f"📋 Задачи/баллы: {data['task_points']}\n"
-            f"🔗 Доказательства: {data['evidence']}\n"
-            f"✍️ Подпись: {data['signature']}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ ПРИНЯТЬ", callback_data=f"approve_report:{report_id}"), InlineKeyboardButton(text="❌ ОТКЛОНИТЬ", callback_data=f"reject_report:{report_id}")]
-            ]),
-        )
+        await bot.send_message(OWNER_ID, f"📄 НОВЫЙ РАПОРТ #{report_id}\n━━━━━━━━━━━━━━━━━━\n🏛 {data['source_organization']}\n📈 {data.get('criterion_from_rank','—')} → {data.get('criterion_to_rank','—')}\n📌 Критерий #{data['criterion_id']}\n🎯 {data.get('to_whom','—')}\n👤 {data['from_whom']}\n📋 {data['task_points']}\n📎 {data['evidence']}\n✍️ {data['signature']}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ ПРИНЯТЬ", callback_data=f"approve_report:{report_id}"), InlineKeyboardButton(text="❌ ОТКЛОНИТЬ", callback_data=f"reject_report:{report_id}")]]))
     await call.answer("Рапорт отправлен владельцу")
 
 
@@ -839,60 +817,36 @@ async def process_report(call: CallbackQuery, report_id: int, approved: bool):
         await call.answer("Только владелец может проверять рапорты", show_alert=True)
         return
     async with SessionLocal() as session:
-        report = await session.get(Report, report_id)
+        report=await session.get(Report, report_id)
         if not report or report.status != "PENDING":
             await call.answer("Рапорт уже обработан", show_alert=True)
             return
-        report.status = "APPROVED" if approved else "REJECTED"
-        report.reviewed_by = call.from_user.id
-        report.reviewed_at = utcnow()
-        user = await session.get(User, report.user_id)
-        source_org = report.source_organization or (user.organization if user else None)
-        org = None
-        if source_org:
-            org = (await session.execute(select(Organization).where(Organization.name == source_org))).scalar_one_or_none()
-        org_chat_id = org.chat_id if org else None
+        report.status="APPROVED" if approved else "REJECTED"
+        report.reviewed_by=call.from_user.id
+        report.reviewed_at=utcnow()
+        user=await session.get(User, report.user_id)
+        source_org=report.source_organization or (user.organization if user else None)
+        org=(await session.execute(select(Organization).where(Organization.name==source_org))).scalar_one_or_none() if source_org else None
+        org_chat_id=org.chat_id if org else None
+        if approved and user and report.criterion_to_rank:
+            user.rank=report.criterion_to_rank
         await session.commit()
-
-    if call.message:
-        try:
-            await call.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
     if bot and user:
-        status_text = "✅ РАПОРТ ПРИНЯТ" if approved else "❌ РАПОРТ ОТКЛОНЁН"
         try:
-            await bot.send_message(user.telegram_id, f"{status_text}\n\nНомер: #{report_id}")
+            await bot.send_message(user.telegram_id, (f"✅ РАПОРТ #{report_id} ПРИНЯТ\nНовое звание: {report.criterion_to_rank}" if approved else f"❌ РАПОРТ #{report_id} ОТКЛОНЁН"))
         except Exception:
             pass
-
-    # Approved report is automatically delivered to the chat of the organization
-    # it came from (e.g. a report from ВЧ goes to the ВЧ chat).
     if approved and bot and org_chat_id:
         try:
-            await bot.send_message(
-                org_chat_id,
-                "📄 РАПОРТ УТВЕРЖДЁН\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                f"#{report_id}\n"
-                f"🏛 Организация: {source_org or '—'}\n"
-                f"🎯 Кому: {report.to_whom}\n"
-                f"👤 От кого: {report.from_whom}\n"
-                f"📋 Задачи/баллы: {report.task_points}\n"
-                f"🔗 Доказательства: {report.evidence}\n"
-                f"✍️ Подпись: {report.signature}\n\n"
-                "Статус: ПРИНЯТ ВЛАДЕЛЬЦЕМ"
-            )
+            mention = f"<a href=\"tg://user?id={user.telegram_id}\">{user.nickname or user.first_name or 'Сотрудник'}</a>" if user else report.from_whom
+            await bot.send_message(org_chat_id, f"📄 РАПОРТ УТВЕРЖДЁН\n━━━━━━━━━━━━━━━━━━\n#{report_id}\n🏛 {source_org}\n👤 {mention}\n📈 {report.criterion_from_rank or '—'} → {report.criterion_to_rank or '—'}\n📌 {report.task_points}\n📎 {report.evidence}\n✍️ {report.signature}\n\nСтатус: ПРИНЯТ ВЛАДЕЛЬЦЕМ", parse_mode="HTML")
         except Exception:
-            pass
-    elif approved and bot and not org_chat_id and user:
-        try:
-            await bot.send_message(user.telegram_id, "⚠️ Рапорт принят, но чат вашей организации ещё не настроен владельцем.")
-        except Exception:
-            pass
-
-    await call.answer("Рапорт принят и отправлен в чат организации" if approved else "Рапорт отклонён")
+            logger.exception("Failed to publish approved report to org chat")
+    await call.answer("Рапорт принят и звание обновлено" if approved else "Рапорт отклонён")
 
 
 @dp.callback_query(F.data.startswith("approve_report:"))
@@ -977,14 +931,26 @@ async def admin_people(call: CallbackQuery):
     if not is_admin(call.from_user.id):
         return
     async with SessionLocal() as session:
-        result = await session.execute(select(User).order_by(User.id.desc()).limit(50))
-        users = result.scalars().all()
-    lines = ["👥 Личный состав"]
-    for u in users:
-        lines.append(f"#{u.id} | {u.nickname or u.first_name or '—'} | {u.organization or '—'} | {u.role} | {'ACTIVE' if u.active else 'ARCHIVE'}")
+        active_users=(await session.execute(select(User).where(User.active == True, User.archived == False).order_by(User.organization, User.id))).scalars().all()
+        archived_users=(await session.execute(select(User).where(User.archived == True).order_by(User.archived_at.desc()).limit(100))).scalars().all()
+    lines=["👥 ДЕЙСТВУЮЩИЙ ЛИЧНЫЙ СОСТАВ","━━━━━━━━━━━━━━━━━━"]
+    if not active_users:
+        lines.append("Сотрудников в составе пока нет.")
+    else:
+        current=None
+        for u in active_users:
+            if u.organization != current:
+                current=u.organization
+                lines.append(f"\n📁 {current or 'Без организации'}")
+            lines.append(f"• {u.nickname or u.first_name or '—'} — {u.rank or '—'} — {u.position or '—'}")
+    lines.append("\n📦 АРХИВ")
+    if not archived_users:
+        lines.append("Архив пуст.")
+    else:
+        for u in archived_users[:50]:
+            lines.append(f"• {u.nickname or u.first_name or '—'} — {u.archived_organization or '—'} — {u.archived_rank or '—'}")
     await edit_page(call, "\n".join(lines), reply_markup=admin_keyboard())
     await call.answer()
-
 
 @dp.callback_query(F.data == "admin_orgs")
 async def admin_orgs(call: CallbackQuery):
@@ -1153,9 +1119,15 @@ async def admin_excel(call: CallbackQuery):
     wb = Workbook()
     ws = wb.active
     ws.title = "Personnel"
-    ws.append(["ID", "Telegram ID", "Username", "Nickname", "Organization", "Rank", "Position", "Department", "Role", "Active", "Archived", "Joined"])
+    ws.append(["ID", "Telegram ID", "Username", "Nickname", "Organization", "Rank", "Position", "Department", "Role", "Active", "Joined"])
     for u in users:
-        ws.append([u.id, u.telegram_id, u.username, u.nickname, u.organization, u.rank, u.position, u.department, u.role, u.active, u.archived, u.joined_at])
+        if u.active and not u.archived:
+            ws.append([u.id, u.telegram_id, u.username, u.nickname, u.organization, u.rank, u.position, u.department, u.role, u.active, u.joined_at])
+    warch = wb.create_sheet("Archive")
+    warch.append(["ID", "Telegram ID", "Nickname", "Organization", "Rank", "Position", "Department", "Archived At"])
+    for u in users:
+        if u.archived:
+            warch.append([u.id, u.telegram_id, u.nickname, u.archived_organization, u.archived_rank, u.archived_position, u.archived_department, u.archived_at])
     wa = wb.create_sheet("Applications")
     wa.append(["ID", "User ID", "Organization", "Nickname", "Rank", "Position", "Department", "Status", "Created"])
     for a in apps:
@@ -1303,6 +1275,10 @@ async def archive_user(message: Message):
         user.active = False
         user.archived = True
         user.archived_at = utcnow()
+        user.archived_organization = user.organization
+        user.archived_rank = user.rank
+        user.archived_position = user.position
+        user.archived_department = user.department
         await session.commit()
     await message.answer("✅ Пользователь отправлен в архив")
 
@@ -1333,22 +1309,50 @@ async def restore_user(message: Message):
 async def member_update(event: ChatMemberUpdated):
     if not bot:
         return
+    tg_id = event.new_chat_member.user.id
     old = event.old_chat_member.status
     new = event.new_chat_member.status
-    leaving = old in {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.RESTRICTED} and new in {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
-    if not leaving:
-        return
-    tg_id = event.from_user.id if event.new_chat_member.user.id == event.from_user.id else event.new_chat_member.user.id
+    joined = old in {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED} and new in {ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
+    leaving = old in {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.RESTRICTED, ChatMemberStatus.CREATOR} and new in {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
     async with SessionLocal() as session:
+        org = (await session.execute(select(Organization).where(Organization.chat_id == event.chat.id))).scalar_one_or_none()
+        if not org:
+            return
         user = await get_user(session, tg_id)
-        if not user:
+        if joined:
+            if not user:
+                await event.answer()
+                return
+            if user.organization != org.name or not user.active or user.archived:
+                try:
+                    await bot.send_message(event.chat.id, f"⚠️ Новый участник: {user.first_name or 'пользователь'}\n\nПользователь не числится действующим сотрудником {org.name}.")
+                except Exception:
+                    pass
+                return
+            mention=f"<a href=\"tg://user?id={user.telegram_id}\">{user.nickname or user.first_name or 'Сотрудник'}</a>"
+            try:
+                await bot.send_message(event.chat.id, f"🆕 НОВЫЙ УЧАСТНИК\n━━━━━━━━━━━━━━━━━━\n👤 {mention}\n🎖 Звание: {user.rank or '—'}\n💼 Должность: {user.position or '—'}\n📂 Подразделение: {user.department or '—'}\n🏛 Организация: {org.name}\n🆔 Telegram ID: {user.telegram_id}", parse_mode="HTML")
+            except Exception:
+                logger.exception("Failed welcome message")
             return
-        if user.role == "OWNER":
-            return
-        user.active = False
-        user.archived = True
-        user.archived_at = utcnow()
-        await session.commit()
+        if leaving and user and user.role != "OWNER" and user.organization == org.name:
+            user.active=False
+            user.archived=True
+            user.archived_at=utcnow()
+            user.archived_organization=user.organization
+            user.archived_rank=user.rank
+            user.archived_position=user.position
+            user.archived_department=user.department
+            user.organization=None
+            user.rank=None
+            user.position=None
+            user.department=None
+            await session.commit()
+            try:
+                await bot.send_message(event.chat.id, f"📦 Сотрудник {user.nickname or user.first_name or tg_id} покинул {org.name}.\nЗапись перенесена в архив.")
+            except Exception:
+                pass
+
 
 
 async def _migrate_schema():
@@ -1375,6 +1379,10 @@ async def _migrate_schema():
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP WITHOUT TIME ZONE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP WITHOUT TIME ZONE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS archived_organization VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS archived_rank VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS archived_position VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS archived_department VARCHAR(255)",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
         # organizations
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS name VARCHAR(255)",
@@ -1416,6 +1424,9 @@ async def _migrate_schema():
         # reports
         "ALTER TABLE reports ADD COLUMN IF NOT EXISTS user_id INTEGER",
         "ALTER TABLE reports ADD COLUMN IF NOT EXISTS source_organization VARCHAR(255)",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS criterion_id INTEGER",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS criterion_from_rank VARCHAR(255)",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS criterion_to_rank VARCHAR(255)",
         "ALTER TABLE reports ADD COLUMN IF NOT EXISTS to_whom VARCHAR(255)",
         "ALTER TABLE reports ADD COLUMN IF NOT EXISTS from_whom VARCHAR(255)",
         "ALTER TABLE reports ADD COLUMN IF NOT EXISTS task_points TEXT",
@@ -1531,7 +1542,7 @@ async def init_db():
     async with SessionLocal() as session:
         existing = (await session.execute(select(Organization))).scalars().all()
         by_name = {x.name for x in existing if x.name}
-        defaults = [("ФСБ", "FSB"), ("ВЧ", "VC"), ("ЕСС", "ESS"), ("УМВД", "UMVD")]
+        defaults = [("ФСБ", "FSB"), ("ВЧ", "VC"), ("ЕСС", "ESS"), ("УМВД", "UMVD"), ("ДПС", "DPS"), ("Правительство", "GOV")]
         for name, code in defaults:
             if name not in by_name:
                 session.add(Organization(name=name, code=code, created_at=utcnow()))
