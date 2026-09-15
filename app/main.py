@@ -421,17 +421,28 @@ async def apply_department(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "apply_confirm")
 async def apply_confirm(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    async with SessionLocal() as session:
-        user = await ensure_user(session, call.from_user.id, call.from_user.username, call.from_user.first_name)
-        result = await session.execute(select(Application).where(Application.user_id == user.id, Application.status == "PENDING"))
-        if result.scalar_one_or_none():
-            await call.answer("У вас уже есть заявление на рассмотрении", show_alert=True)
-            await state.clear()
-            return
-        app = Application(user_id=user.id, **data, status="PENDING", created_at=utcnow())
-        session.add(app)
-        await session.commit()
-        app_id = app.id
+    required = ("organization", "nickname", "rank", "position", "department")
+    if not all(str(data.get(k, "")).strip() for k in required):
+        await call.answer("Заявление заполнено не полностью. Начните заполнение заново.", show_alert=True)
+        return
+    try:
+        async with SessionLocal() as session:
+            user = await ensure_user(session, call.from_user.id, call.from_user.username, call.from_user.first_name)
+            result = await session.execute(
+                select(Application).where(Application.user_id == user.id, Application.status == "PENDING")
+            )
+            if result.scalar_one_or_none():
+                await call.answer("У вас уже есть заявление на рассмотрении", show_alert=True)
+                await state.clear()
+                return
+            app = Application(user_id=user.id, **data, status="PENDING", created_at=utcnow())
+            session.add(app)
+            await session.commit()
+            app_id = app.id
+    except Exception:
+        logger.exception("Failed to create application for Telegram user %s", call.from_user.id)
+        await call.answer("Не удалось отправить заявление. Попробуйте ещё раз через несколько секунд.", show_alert=True)
+        return
     await state.clear()
     await edit_page(call, "✅ Заявление отправлено владельцу на рассмотрение.")
     if bot and OWNER_ID:
@@ -713,26 +724,31 @@ async def report_confirm(call: CallbackQuery, state: FSMContext):
     if not all(str(data.get(k, "")).strip() for k in required):
         await call.answer("Рапорт заполнен не полностью", show_alert=True)
         return
-    async with SessionLocal() as session:
-        user = await get_user(session, call.from_user.id)
-        if not user:
-            await call.answer("Пользователь не найден", show_alert=True)
-            return
-        # Report number is the DB ID, so it is always displayed as #1, #2, #3...
-        report = Report(
-            user_id=user.id,
-            source_organization=data.get("source_organization") or user.organization or "Не указана",
-            to_whom=data["to_whom"],
-            from_whom=data["from_whom"],
-            task_points=data["task_points"],
-            evidence=data["evidence"],
-            signature=data["signature"],
-            status="PENDING",
-            created_at=utcnow(),
-        )
-        session.add(report)
-        await session.commit()
-        report_id = report.id
+    try:
+        async with SessionLocal() as session:
+            user = await get_user(session, call.from_user.id)
+            if not user:
+                await call.answer("Пользователь не найден", show_alert=True)
+                return
+            # Report number is the DB ID, so it is always displayed as #1, #2, #3...
+            report = Report(
+                user_id=user.id,
+                source_organization=data.get("source_organization") or user.organization or "Не указана",
+                to_whom=data["to_whom"],
+                from_whom=data["from_whom"],
+                task_points=data["task_points"],
+                evidence=data["evidence"],
+                signature=data["signature"],
+                status="PENDING",
+                created_at=utcnow(),
+            )
+            session.add(report)
+            await session.commit()
+            report_id = report.id
+    except Exception:
+        logger.exception("Failed to create report for Telegram user %s", call.from_user.id)
+        await call.answer("Не удалось отправить рапорт. Попробуйте ещё раз через несколько секунд.", show_alert=True)
+        return
     await state.clear()
     await edit_page(
         call,
@@ -1281,6 +1297,10 @@ async def _migrate_schema():
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS invite_link TEXT",
         "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
         # applications
+        # IMPORTANT: older Render databases were created before applications.user_id
+        # existed. Keep the new column nullable so old rows do not break migration;
+        # every new application written by the current bot always supplies user_id.
+        "ALTER TABLE applications ADD COLUMN IF NOT EXISTS user_id INTEGER",
         "ALTER TABLE applications ADD COLUMN IF NOT EXISTS organization VARCHAR(255)",
         "ALTER TABLE applications ADD COLUMN IF NOT EXISTS nickname VARCHAR(255)",
         "ALTER TABLE applications ADD COLUMN IF NOT EXISTS rank VARCHAR(255)",
@@ -1410,11 +1430,8 @@ async def _run_bot_polling():
 async def lifespan(app: FastAPI):
     global _polling_task
     logger.info("NEMAZING RP starting...")
-    try:
-        await init_db()
-        logger.info("Database initialization completed.")
-    except Exception:
-        logger.exception("Database initialization failed.")
+    await init_db()
+    logger.info("Database initialization completed.")
     if bot:
         _polling_task = asyncio.create_task(_run_bot_polling())
     yield
