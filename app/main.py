@@ -1005,3 +1005,152 @@ async def init_db():
                 owner.archived = False
 
         await session.commit()
+
+# ============================================================
+# WEB SERVER / RENDER STARTUP
+# ============================================================
+
+import logging
+from contextlib import suppress
+
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("nemazing")
+
+_polling_task: Optional[asyncio.Task] = None
+
+
+async def _run_bot_polling():
+    """Run Telegram polling independently from the FastAPI web server."""
+    if not bot:
+        logger.warning("BOT_TOKEN is not configured; Telegram polling is disabled.")
+        return
+
+    while True:
+        try:
+            logger.info("Starting Telegram bot polling...")
+            await bot.delete_webhook(drop_pending_updates=False)
+            await dp.start_polling(
+                bot,
+                allowed_updates=dp.resolve_used_update_types(),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Telegram polling crashed; retrying in 5 seconds.")
+            await asyncio.sleep(5)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _polling_task
+
+    logger.info("NEMAZING RP starting...")
+    logger.info("DATABASE_URL scheme: %s", DATABASE_URL.split(":", 1)[0])
+
+    # Database errors must be visible in Render logs but must not prevent
+    # the HTTP health endpoint from opening a port.
+    try:
+        await init_db()
+        logger.info("Database initialization completed.")
+    except Exception:
+        logger.exception("Database initialization failed.")
+
+    if bot:
+        _polling_task = asyncio.create_task(_run_bot_polling())
+        logger.info("Telegram polling task created.")
+    else:
+        logger.warning("Telegram bot is disabled because BOT_TOKEN is empty.")
+
+    yield
+
+    logger.info("NEMAZING RP shutting down...")
+
+    if _polling_task:
+        _polling_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _polling_task
+        _polling_task = None
+
+    if bot:
+        with suppress(Exception):
+            await bot.session.close()
+
+    with suppress(Exception):
+        await engine.dispose()
+
+
+app = FastAPI(
+    title="NEMAZING RP",
+    version="1.0.0",
+    description="NEMAZING RP personnel management Telegram bot",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "NEMAZING RP",
+        "version": "1.0.0",
+        "status": "online",
+        "message": "NEMAZING RP API is running",
+        "health": "/health",
+        "api_health": "/api/health",
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "service": "nemazing-rp",
+    }
+
+
+@app.get("/api/health")
+async def api_health():
+    return {
+        "status": "ok",
+        "service": "nemazing-rp",
+        "bot_configured": bool(BOT_TOKEN),
+        "database_configured": bool(DATABASE_URL),
+    }
+
+
+@app.get("/api/status")
+async def api_status():
+    polling_running = bool(_polling_task and not _polling_task.done())
+    return {
+        "service": "NEMAZING RP",
+        "status": "online",
+        "bot_configured": bool(BOT_TOKEN),
+        "polling_running": polling_running,
+        "owner_configured": bool(OWNER_ID),
+        "channel": CHANNEL_USERNAME,
+    }
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "10000"))
+    logger.info("Starting Uvicorn on 0.0.0.0:%s", port)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+    )
