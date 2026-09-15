@@ -3,23 +3,16 @@ services:
     name: nemazing-rp
     runtime: python
     plan: free
-
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-
-    startCommand: python3 -m app.main
-
+    buildCommand: python3 -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt
+    startCommand: .venv/bin/python -u -m app.main
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.10
-
       - key: BOT_TOKEN
         sync: false
-
       - key: OWNER_ID
         sync: false
-
       - key: CHANNEL_USERNAME
         value: "@nemazing"
-
       - key: DATABASE_URL
-        value: "sqlite+aiosqlite:///./data/nemazing.db"
+        sync: false
